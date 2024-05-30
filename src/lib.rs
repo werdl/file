@@ -2,7 +2,7 @@ mod defs;
 
 
 mod tests {
-    use crate::defs::{File, FileOptions};
+    use crate::defs::{File, FileOptions, Reader, Writer};
     use std::io::Read;
 
 
@@ -19,6 +19,8 @@ mod tests {
         let mut file: File = file.unwrap();
         
         // read the file
-        let contents = file.read();
+        let contents = file.fread();
+
+        assert!(contents.is_ok());
     }
 }

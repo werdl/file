@@ -80,8 +80,6 @@ impl FileOptions {
         if self.contains(FileOptions::Uninitialized) {
             return Err(FileError {
                 message: "FileOptions uninitialized".to_string(),
-                file_options: self,
-                file_name: file_name.to_string(),
                 underlying_error: std::io::Error::new(std::io::ErrorKind::InvalidInput, "FileOptions uninitialized"),
             });
         }
@@ -103,12 +101,32 @@ impl FileOptions {
             }),
             Err(e) => Err(FileError {
                 message: e.to_string(),
-                file_options: self,
-                file_name: file_name.to_string(),
                 underlying_error: e,
             }),
         }
     
+    }
+}
+
+pub enum SeekFrom {
+    Start(u64),
+    End(i64),
+    Current(i64),
+}
+
+impl From<u64> for SeekFrom {
+    fn from(pos: u64) -> Self {
+        SeekFrom::Start(pos)
+    }
+}
+
+impl From<SeekFrom> for std::io::SeekFrom {
+    fn from(pos: SeekFrom) -> Self {
+        match pos {
+            SeekFrom::Start(pos) => std::io::SeekFrom::Start(pos),
+            SeekFrom::End(pos) => std::io::SeekFrom::End(pos),
+            SeekFrom::Current(pos) => std::io::SeekFrom::Current(pos),
+        }
     }
 }
 
@@ -122,108 +140,110 @@ pub struct File {
 #[derive(Debug)]
 pub struct FileError {
     message: String,
-    file_options: FileOptions,
-    file_name: String,
     underlying_error: std::io::Error,
 }
 
-impl File {
-    pub fn read(&mut self) -> Result<String, FileError> {
-        let mut buffer = String::new();
-        match self.underlying_file.read_to_string(&mut buffer) {
-            Ok(_) => {
-                println!("Read {} bytes from file", buffer.len());
-                Ok(buffer)
-            },
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: e,
-            }),
+impl From<std::io::Error> for FileError {
+    fn from(e: std::io::Error) -> Self {
+        FileError {
+            message: e.to_string(),
+            underlying_error: e,
         }
     }
+}
 
-    pub fn read_u8(&mut self) -> Result<Vec<u8>, FileError> {
-        let string = self.read();
+pub trait Writer {
+    fn fwrite(&mut self, buf: String) -> Result<usize, FileError>;
+    fn fwrite_u8(&mut self, buf: &[u8]) -> Result<usize, FileError>;
+    fn fflush(&mut self) -> Result<(), FileError>;
+}
 
-        match string {
-            Ok(s) => Ok(s.into_bytes()),
-            Err(e) => Err(e),
-        }
+pub trait Reader {
+    fn fread(&mut self) -> Result<String, FileError>;
+    fn fread_u8(&mut self) -> Result<Vec<u8>, FileError>;
+}
+
+pub trait Seeker {
+    fn fseek(&mut self, pos: SeekFrom) -> Result<u64, FileError>;
+}
+
+// first, implement our traits for anything implementing std::io::Write
+impl<T> Writer for T
+where
+    T: Write,
+{
+    fn fwrite(&mut self, buf: String) -> Result<usize, FileError> {
+        self.write(buf.as_bytes()).map_err(FileError::from)
     }
 
-    pub fn write<T: ToString>(&mut self, data: T) -> Result<(), FileError> {
-        match self.underlying_file.write_all(data.to_string().as_bytes()) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: e,
-            }),
-        }
+    fn fwrite_u8(&mut self, buf: &[u8]) -> Result<usize, FileError> {
+        self.write(buf).map_err(FileError::from)
     }
 
-    pub fn write_u8(&mut self, data: Vec<u8>) -> Result<(), FileError> {
-        let string = String::from_utf8(data);
+    fn fflush(&mut self) -> Result<(), FileError> {
+        Write::flush(self).map_err(FileError::from)
+    }
+}
 
-        match string {
-            Ok(s) => self.write(s),
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-            }),
-        }
+// next, implement our traits for anything implementing std::io::Read
+impl<T> Reader for T
+where
+    T: Read,
+{
+    fn fread(&mut self) -> Result<String, FileError> {
+        let mut buf = String::new();
+        self.read_to_string(&mut buf).map_err(FileError::from)?;
+        Ok(buf)
     }
 
-    pub fn flush(&mut self) -> Result<(), FileError> {
-        match self.underlying_file.flush() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: e,
-            }),
-        }
+    fn fread_u8(&mut self) -> Result<Vec<u8>, FileError> {
+        let mut buf = Vec::new();
+        self.read_to_end(&mut buf).map_err(FileError::from)?;
+        Ok(buf)
+    }
+}
+
+// finally, implement our traits for anything implementing std::io::Seek
+impl<T> Seeker for T
+where
+    T: Seek,
+{
+    fn fseek(&mut self, pos: SeekFrom) -> Result<u64, FileError> {
+        Seek::seek(self, pos.into()).map_err(FileError::from)
+    }
+}
+
+// now, implement our traits for our File struct
+impl Writer for File {
+    fn fwrite(&mut self, buf: String) -> Result<usize, FileError> {
+        self.underlying_file.write(buf.as_bytes()).map_err(FileError::from)
     }
 
-    pub fn delete(self) -> Result<(), FileError> {
-        match std::fs::remove_file(self.file_name.clone()) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: e,
-            }),
-        }
+    fn fwrite_u8(&mut self, buf: &[u8]) -> Result<usize, FileError> {
+        self.underlying_file.write(buf).map_err(FileError::from)
     }
 
-    pub fn close(self) -> Result<(), FileError> {
-        match self.underlying_file.sync_all() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: e,
-            }),
-        }
+    fn fflush(&mut self) -> Result<(), FileError> {
+        self.underlying_file.flush().map_err(FileError::from)
+    }
+}
+
+impl Reader for File {
+    fn fread(&mut self) -> Result<String, FileError> {
+        let mut buf = String::new();
+        self.underlying_file.read_to_string(&mut buf).map_err(FileError::from)?;
+        Ok(buf)
     }
 
-    pub fn seek(&mut self, pos: u32) -> Result<u64, FileError> {
-        match self.underlying_file.seek(std::io::SeekFrom::Start(pos as u64)) {
-            Ok(pos) => Ok(pos),
-            Err(e) => Err(FileError {
-                message: e.to_string(),
-                file_options: self.file_options,
-                file_name: self.file_name.clone(),
-                underlying_error: e,
-            }),
-        }
+    fn fread_u8(&mut self) -> Result<Vec<u8>, FileError> {
+        let mut buf = Vec::new();
+        self.underlying_file.read_to_end(&mut buf).map_err(FileError::from)?;
+        Ok(buf)
+    }
+}
+
+impl Seeker for File {
+    fn fseek(&mut self, pos: SeekFrom) -> Result<u64, FileError> {
+        self.underlying_file.seek(pos.into()).map_err(FileError::from)
     }
 }
